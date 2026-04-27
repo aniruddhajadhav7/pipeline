@@ -24,15 +24,21 @@ import (
 	"time"
 
 	cloudevents "github.com/cloudevents/sdk-go/v2"
-	"github.com/tektoncd/pipeline/pkg/apis/config"
-	"github.com/tektoncd/pipeline/pkg/apis/pipeline/v1beta1"
-	"github.com/tektoncd/pipeline/pkg/reconciler/events/cache"
+	"go.opentelemetry.io/otel"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/runtime"
 	"knative.dev/pkg/apis"
 	controller "knative.dev/pkg/controller"
 	"knative.dev/pkg/logging"
+
+	"github.com/tektoncd/pipeline/pkg/apis/config"
+	"github.com/tektoncd/pipeline/pkg/apis/pipeline/v1beta1"
+	"github.com/tektoncd/pipeline/pkg/reconciler/events/cache"
+)
+
+const (
+	TracerName = "CloudEventController"
 )
 
 func cloudEventsSink(ctx context.Context) string {
@@ -54,6 +60,8 @@ func cloudEventsSink(ctx context.Context) string {
 // processed; skip entirely — including the event build and send. A miss means
 // a new object or the condition changed; proceed to call SendCloudEventWithRetries
 func EmitCloudEvents(ctx context.Context, object runtime.Object) {
+	ctx, span := otel.GetTracerProvider().Tracer(TracerName).Start(ctx, "EmitCloudEvents")
+	defer span.End()
 	logger := logging.FromContext(ctx)
 	runObject, ok := object.(v1beta1.RunObject)
 	if !ok {
@@ -67,11 +75,13 @@ func EmitCloudEvents(ctx context.Context, object runtime.Object) {
 		wasPresent, err := cache.ContainsOrAddObject(cacheClient, runObject)
 		if err != nil {
 			logger.Warnf("failed to emit cloud events: could not check the events cache %v", err.Error())
+			span.RecordError(err)
 		}
 		if err == nil && !wasPresent {
 			ctx = cloudevents.ContextWithTarget(ctx, sink)
 			if err := SendCloudEventWithRetries(ctx, runObject); err != nil {
 				logger.Warnf("failed to emit cloud events %v", err.Error())
+				span.RecordError(err)
 			}
 		}
 	}
